@@ -68,11 +68,23 @@ export async function startIngestion(files: File[]) {
  * @param {string} jobId - L'ID du job à suivre.
  */
 function connectToJobStatus(jobId: string) {
-  // Construit l'URL WebSocket en respectant le protocole de la page (ws/wss)
-  const wsProtocol = window.location.protocol === 'https' ? 'wss' : 'ws';
-  const wsUrl = `${wsProtocol}://${window.location.host}/ws/jobs/${jobId}/status`;
+  // ======================= ELITE FIX : CORRECTION DE LA SYNTAXE DE L'URL =======================
+  // 1. La variable `wsProtocol` ne doit PAS contenir de deux-points. Elle contient 'ws' ou 'wss'.
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
   
-  socket = new WebSocket(wsUrl);
+  // 2. La construction de l'URL utilise maintenant la syntaxe standard `protocole://host/path`.
+  const wsUrl = `${wsProtocol}://${window.location.host}/api/v1/ws/jobs/${jobId}/status`;
+  // ===========================================================================================
+
+  try {
+    socket = new WebSocket(wsUrl);
+  } catch (error) {
+    // Capture l'erreur de construction si l'URL est toujours invalide.
+    console.error('[SERVICE ERROR] Failed to construct WebSocket:', error);
+    _addLog('ERROR', `Échec de la construction du WebSocket : ${error instanceof Error ? error.message : String(error)}`);
+    ingestionStatus.set('FAILED');
+    return; // Arrête l'exécution si la construction échoue.
+  }
 
   socket.onopen = () => {
     ingestionStatus.set('RUNNING');
@@ -81,12 +93,18 @@ function connectToJobStatus(jobId: string) {
 
   socket.onmessage = (event) => {
     const data = JSON.parse(event.data);
-    
+
     if (data.type === 'log') {
       _addLog(data.level.toUpperCase(), data.message);
     } else if (data.type === 'status') {
-      ingestionStatus.set(data.status.toUpperCase() as IngestionStatus);
+      const newStatus = data.status.toUpperCase() as IngestionStatus;
+      ingestionStatus.set(newStatus);
       _addLog('INFO', `Nouveau statut : ${data.status} - ${data.message}`);
+
+      if (newStatus === 'SUCCESS' || newStatus === 'FAILED') {
+        _addLog('INFO', 'Job terminé. Fermeture de la connexion WebSocket.');
+        socket?.close();
+      }
     }
   };
 
@@ -98,16 +116,10 @@ function connectToJobStatus(jobId: string) {
 
   socket.onclose = () => {
     _addLog('INFO', 'Connexion au flux de logs terminée.');
-    // Ne changez le statut que s'il est encore en cours
     ingestionStatus.update(status => (status === 'RUNNING' || status === 'PENDING' ? 'IDLE' : status));
   };
 }
 
-/**
- * Ajoute une entrée de log au store.
- * @param {LogEntry['level']} level - Le niveau du log.
- * @param {string} message - Le message du log.
- */
 function _addLog(level: LogEntry['level'], message: string) {
   ingestionLogs.update(currentLogs => {
     return [...currentLogs, { level, message, timestamp: new Date() }];
